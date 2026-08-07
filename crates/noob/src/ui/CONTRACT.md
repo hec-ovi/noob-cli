@@ -17,7 +17,12 @@ What a turn driver may call, and all it may call mid-turn:
 impl Ui {
     pub fn note(&mut self, s: &str);            // dim advisory line
     pub fn error(&mut self, s: &str);
-    pub fn ask(&mut self, q: &str) -> bool;     // blocking user question
+    pub fn ask(&mut self, q: &str) -> bool;     // blocking user question; a
+                                                // surface that cannot reach a
+                                                // human answers no. The serve
+                                                // surface plugs in a hook
+                                                // (set_ask_hook) that carries
+                                                // the question to a front end
     pub fn text_delta(&mut self, s: &str);
     pub fn reasoning_delta(&mut self, s: &str); // never enters transcripts
     pub fn end_line(&mut self);

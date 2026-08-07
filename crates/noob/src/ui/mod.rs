@@ -227,6 +227,10 @@ pub struct Ui {
     /// reading stdin, and the scanner thread never starts (the dock draws
     /// its own liveness). None on every directly-writing `Ui`.
     turn_tx: Option<std::sync::mpsc::SyncSender<dock::Ev>>,
+    /// Set on the serve `Ui` (see `set_ask_hook`): a front end owns the
+    /// question surface, so `ask` delegates here instead of reading stdin.
+    /// The hook blocks until the front end answers; false when it never can.
+    ask_hook: Option<Box<dyn FnMut(&str) -> bool + Send>>,
     /// Call ids covered by an open agents fan-out panel. On the themed surface
     /// their per-task `* task` activity lines are suppressed in favor of the
     /// block; consulted only when `styled()`, so byte-identity surfaces still
@@ -308,6 +312,7 @@ impl Ui {
             err: Box::new(std::io::stderr()),
             scanner: None,
             turn_tx: None,
+            ask_hook: None,
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,
@@ -332,6 +337,11 @@ impl Ui {
         }
     }
 
+    /// Route `ask` through a front end instead of stdin (the serve surface).
+    pub(crate) fn set_ask_hook(&mut self, hook: Box<dyn FnMut(&str) -> bool + Send>) {
+        self.ask_hook = Some(hook);
+    }
+
     /// A `Ui` for one dock-managed turn. Its public rendering operations ship
     /// semantic events over the dock channel; its sinks are deliberately inert
     /// so a future helper that forgets to intercept cannot become a second
@@ -350,6 +360,7 @@ impl Ui {
             err: Box::new(std::io::sink()),
             scanner: None,
             turn_tx: Some(tx),
+            ask_hook: None,
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,
@@ -378,6 +389,7 @@ impl Ui {
                 err: Box::new(buffer.clone()),
                 scanner: None,
                 turn_tx: None,
+                ask_hook: None,
                 panel_task_ids: std::collections::HashSet::new(),
                 batch: Vec::new(),
                 batch_depth: 0,
@@ -989,6 +1001,10 @@ impl Ui {
         if let Some(forced) = self.forced_ask {
             return forced;
         }
+        // A serve Ui: the front end owns the question surface.
+        if let Some(hook) = &mut self.ask_hook {
+            return hook(question);
+        }
         // A turn Ui: the render loop owns stdin, so the question travels
         // the event channel and this worker blocks for the human's answer.
         // A closed channel means the turn is being torn down: deny, the
@@ -1414,6 +1430,7 @@ mod tests {
             err: Box::new(err.clone()),
             scanner: None,
             turn_tx: None,
+            ask_hook: None,
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,

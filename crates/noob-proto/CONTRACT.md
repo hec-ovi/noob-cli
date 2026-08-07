@@ -1,6 +1,6 @@
 # noob-proto
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -18,7 +18,7 @@ end writes `Command` frames. Nothing else crosses.
 ## Public surface
 
 ```rust
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 pub struct Frame<T> { pub v: u16, pub body: T }
 impl<T> Frame<T> {
@@ -39,7 +39,7 @@ pub fn decode<T: Body>(line: &str) -> Option<Frame<T>>; // None only per the err
 pub use serde_json::Value;   // Event::ToolStart carries one; consumers stay self-contained
 ```
 
-The bodies are `pub enum Event` (25 variants) and `pub enum Command` (14
+The bodies are `pub enum Event` (26 variants) and `pub enum Command` (15
 variants); the shapes they carry are `pub struct ToolError`, `Usage`, `Span`,
 `Sample` and `pub enum AgentState`. Every field mirrors its schema file below,
 field for field, and the schema is enforced at the test boundary
@@ -80,6 +80,7 @@ A `?` field is written only when present, never as null.
 | `metrics` | `Metrics` | `group`, `at_ms`, `samples` ([`schema/sample.json`](schema/sample.json)); a new readout is a new `group`, not a new frame type |
 | `note` | `Note` | `line` |
 | `user.echo` | `UserEcho` | `text`; a prompt echoed back when a recorded session replays at resume; live prompts travel as Commands |
+| `ask` | `Ask` | `ask_id`, `question`; a yes/no question the turn blocks on until the matching `ask.answer` arrives; silence reads as no |
 | `error` | `Error` | `line` |
 | `unknown` | `Unknown` | nothing; the envelope alone |
 
@@ -92,6 +93,7 @@ Shapes per tag: [`schema/command.json`](schema/command.json).
 | `prompt.submit` | `PromptSubmit` | `text` |
 | `prompt.queue` | `PromptQueue` | `text`; queues behind the running turn instead of interrupting it |
 | `turn.cancel` | `TurnCancel` | nothing |
+| `ask.answer` | `AskAnswer` | `ask_id`, `yes`; a stale or unknown `ask_id` is ignored |
 | `agent.cancel` | `AgentCancel` | `agent_id` |
 | `skill.add` | `SkillAdd` | `source` |
 | `skill.remove` | `SkillRemove` | `name` |

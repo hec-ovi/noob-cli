@@ -62,7 +62,11 @@ fn replay_record(emitter: &emit::Emitter, path: &std::path::Path) -> bool {
             continue;
         };
         match frame.body {
-            noob_proto::Event::SessionStart { .. } | noob_proto::Event::SessionEnd { .. } => {}
+            // Lifecycle frames the fresh boot already said, and questions to
+            // a live human: a replayed ask has nobody waiting on its answer.
+            noob_proto::Event::SessionStart { .. }
+            | noob_proto::Event::SessionEnd { .. }
+            | noob_proto::Event::Ask { .. } => {}
             body => {
                 emitter.send(body);
                 sent = true;
@@ -236,6 +240,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     // running rather than after it. The turn itself stays on the main thread,
     // one at a time, which is what keeps the transcript ordered.
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (ask_tx, ask_rx) = std::sync::mpsc::channel::<(u64, bool)>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut line = String::new();
@@ -261,10 +266,41 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
                 noob_proto::Command::TurnCancel => {
                     INTERRUPTED.store(true, Ordering::SeqCst);
                 }
+                noob_proto::Command::AskAnswer { ask_id, yes } => {
+                    let _ = ask_tx.send((ask_id, yes));
+                }
                 _ => {}
             }
         }
     });
+
+    // Confirmations (a skill install, a write into a skills directory) become
+    // Ask frames the front end answers. Asks are serial because the turn
+    // blocks on each one, so an unmatched id is an answer to a question no
+    // longer pending and is dropped; a canceled turn or a closed stream
+    // reads as no, the same degradation as every unanswerable surface.
+    let ask_emitter = emitter.clone();
+    let mut next_ask = 0u64;
+    ui.set_ask_hook(Box::new(move |question| {
+        next_ask += 1;
+        let ask_id = next_ask;
+        ask_emitter.send(noob_proto::Event::Ask {
+            ask_id,
+            question: question.to_string(),
+        });
+        loop {
+            match ask_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok((id, yes)) if id == ask_id => return yes,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        return false;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }));
 
     loop {
         // A detached child settles on its own schedule, after the turn that

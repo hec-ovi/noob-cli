@@ -316,6 +316,19 @@
       }
     },
     {
+      "title": "ask",
+      "description": "A yes/no question the agent needs answered before it continues; the turn blocks until the matching ask.answer arrives.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "ask_id", "question"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "ask" },
+        "ask_id": { "$ref": "#/$defs/u64" },
+        "question": { "type": "string" }
+      }
+    },
+    {
       "title": "error",
       "type": "object",
       "additionalProperties": false,
@@ -343,7 +356,7 @@
       "description": "Protocol version. This writer writes 2; a reader refuses a frame above its own version.",
       "type": "integer",
       "minimum": 0,
-      "maximum": 2
+      "maximum": 3
     },
     "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "u64": { "type": "integer", "minimum": 0 },

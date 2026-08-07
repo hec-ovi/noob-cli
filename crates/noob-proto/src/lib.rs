@@ -53,7 +53,7 @@ use std::fmt::Write as _;
 pub use serde_json::Value;
 
 /// Protocol version. Additive changes bump this; readers accept `<=` their own.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// One frame on the wire: a version and a body.
 ///
@@ -445,6 +445,14 @@ pub enum Event {
     UserEcho {
         text: String,
     },
+    /// A yes/no question the agent needs answered before it continues (a
+    /// skill install, a write into a skills directory). The turn blocks
+    /// until the matching `ask.answer` arrives; a canceled turn or a front
+    /// end that never answers reads as no.
+    Ask {
+        ask_id: u64,
+        question: String,
+    },
 
     /// A frame this reader does not know. Present so a newer writer degrades to
     /// missing features rather than a dead stream.
@@ -477,6 +485,7 @@ impl Body for Event {
             Event::Metrics { .. } => "metrics",
             Event::Note { .. } => "note",
             Event::UserEcho { .. } => "user.echo",
+            Event::Ask { .. } => "ask",
             Event::Error { .. } => "error",
             Event::Unknown => "unknown",
         }
@@ -611,6 +620,10 @@ impl Body for Event {
             }
             Event::Note { line } | Event::Error { line } => f_str(out, "line", line),
             Event::UserEcho { text } => f_str(out, "text", text),
+            Event::Ask { ask_id, question } => {
+                f_u64(out, "ask_id", *ask_id);
+                f_str(out, "question", question);
+            }
             Event::Unknown => {}
         }
     }
@@ -716,6 +729,10 @@ impl Body for Event {
             "user.echo" => Event::UserEcho {
                 text: get_str(value, "text"),
             },
+            "ask" => Event::Ask {
+                ask_id: get_u64(value, "ask_id"),
+                question: get_str(value, "question"),
+            },
             "note" => Event::Note {
                 line: get_str(value, "line"),
             },
@@ -738,6 +755,12 @@ pub enum Command {
         text: String,
     },
     TurnCancel,
+    /// The answer to an `Event::Ask`. A stale or unknown `ask_id` is ignored
+    /// the way every unanswerable frame is.
+    AskAnswer {
+        ask_id: u64,
+        yes: bool,
+    },
 
     AgentCancel {
         agent_id: String,
@@ -782,6 +805,7 @@ impl Body for Command {
             Command::PromptSubmit { .. } => "prompt.submit",
             Command::PromptQueue { .. } => "prompt.queue",
             Command::TurnCancel => "turn.cancel",
+            Command::AskAnswer { .. } => "ask.answer",
             Command::AgentCancel { .. } => "agent.cancel",
             Command::SkillAdd { .. } => "skill.add",
             Command::SkillRemove { .. } => "skill.remove",
@@ -804,6 +828,10 @@ impl Body for Command {
             Command::TurnCancel | Command::SessionList | Command::Unknown => {}
             Command::AgentCancel { agent_id } => f_str(out, "agent_id", agent_id),
             Command::SkillAdd { source } => f_str(out, "source", source),
+            Command::AskAnswer { ask_id, yes } => {
+                f_u64(out, "ask_id", *ask_id);
+                f_bool(out, "yes", *yes);
+            }
             Command::SkillRemove { name }
             | Command::McpRemove { name }
             | Command::McpConnect { name } => f_str(out, "name", name),
@@ -829,6 +857,10 @@ impl Body for Command {
                 text: get_str(value, "text"),
             },
             "turn.cancel" => Command::TurnCancel,
+            "ask.answer" => Command::AskAnswer {
+                ask_id: get_u64(value, "ask_id"),
+                yes: get_bool(value, "yes").unwrap_or_default(),
+            },
             "agent.cancel" => Command::AgentCancel {
                 agent_id: get_str(value, "agent_id"),
             },
@@ -1248,6 +1280,10 @@ mod tests {
             Event::Note {
                 line: "resumed".into(),
             },
+            Event::Ask {
+                ask_id: 7,
+                question: "install skill \"research\" from ./research?".into(),
+            },
             Event::Error {
                 line: "endpoint refused".into(),
             },
@@ -1322,6 +1358,10 @@ mod tests {
                 value: "laguna".into(),
             },
             Command::ConfigUnset { key: "model".into() },
+            Command::AskAnswer {
+                ask_id: 7,
+                yes: true,
+            },
             Command::SessionList,
             Command::SessionOpen { id: "s1".into() },
             Command::Unknown,
@@ -1377,7 +1417,7 @@ mod tests {
             brief: "src/a.rs".into(),
             args: Value::Null,
         });
-        assert!(line.starts_with(r#"{"v":2,"t":"tool.start","#), "{line}");
+        assert!(line.starts_with(r#"{"v":3,"t":"tool.start","#), "{line}");
     }
 
     /// The correlation fix. Every tool frame carries the same id, so a consumer

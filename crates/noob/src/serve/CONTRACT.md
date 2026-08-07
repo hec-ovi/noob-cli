@@ -27,6 +27,11 @@ agent answers and when.
   built against a newer agent loses a feature, not its session.
 - `turn.cancel` sets the shared interrupt; the running turn winds down
   exactly as a Ctrl-C would, and the flag resets before the next prompt.
+- A confirmation the turn needs (a skill install, a write into a skills
+  directory) goes out as an `ask` frame and the turn blocks until the
+  matching `ask.answer` comes back. Ids pair the two; an unmatched id is
+  dropped. A canceled turn or a closed stream reads as no. Recorded asks
+  are never replayed: a stale question has nobody waiting on its answer.
 - Exactly one frame stream: stdout carries frames and nothing else; human
   diagnostics go to stderr.
 - Every frame is also recorded beside the session
