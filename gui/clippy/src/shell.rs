@@ -408,8 +408,12 @@ pub(crate) fn context_reading(
     })
 }
 /// What a right click opens, for what it landed on, or nothing when it landed
-/// on something no menu belongs to: the title strip, a window button, the
-/// margin between panes.
+/// on something no menu belongs to: a window button, a divider, a control on
+/// the settings panel.
+///
+/// `covered` is whether the picker or the settings panel owns the screen. Those
+/// two are takeovers: the window's own menu acts on panes that are not on
+/// screen while one of them is up, so the title strip opens nothing there.
 ///
 /// A free function taking everything it reads, so the routing from a hit to a
 /// menu can be tested without a window or a GPU. The greying of the copy rows
@@ -422,6 +426,7 @@ pub(crate) fn menu_for(
     prompt_selection: bool,
     selection: Option<select::Selection>,
     picker: Option<&Picker>,
+    covered: bool,
 ) -> Option<Menu> {
     // A click that never moved leaves an empty selection behind, and a Copy row
     // that lit up for one would copy nothing.
@@ -434,18 +439,29 @@ pub(crate) fn menu_for(
             selection.and_then(|selection| selection.view()) == Some(view),
         ))
     };
+    // The window's own menu, for everywhere that is the window rather than
+    // something in it. The way back into a window whose widgets have all been
+    // closed: it carries the list of them.
+    let window = || (!covered).then(|| Menu::for_window(at));
     match hit? {
         Hit::Input => Some(Menu::for_input(at, prompt_selection)),
         Hit::Tab(view, space) => widget(view, space),
         // A pane, the rows of its own file list and the arrows of its own strip
         // are all the same widget: the menu acts on whatever that space is
-        // showing.
+        // showing. A space showing nothing is window, not widget.
         Hit::Body(space)
         | Hit::Scrollbar(space)
         | Hit::File(_, space)
         | Hit::TabsLeft(space)
-        | Hit::TabsRight(space) => widget(dock.slot(space).active()?, space),
-        Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
+        | Hit::TabsRight(space) => match dock.slot(space).active() {
+            Some(view) => widget(view, space),
+            None => window(),
+        },
+        // The title strip is the window, and so is the room the panes leave
+        // over. The three buttons are not: each one is a press with one
+        // meaning, and a menu over it would cover the button it came from.
+        Hit::TitleBar | Hit::Window => window(),
+        Hit::Close | Hit::Maximize | Hit::Minimize => None,
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
         //

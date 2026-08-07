@@ -370,39 +370,45 @@ every other window on the desktop.
 **Click a row of the activity list** to open that call out over the window, and
 press anywhere else or Escape to put it away.
 
-Right click the prompt for Copy and Paste, a pane or its tab for Settings,
-Copy selection, Close this widget and Widgets, or the settings panel's document
-column for the one row that fits there, Copy selection. A row with nothing to act on is
-greyed rather than absent, so the menu is the same shape every time and the row
-you were aiming for has not moved. Closing a widget takes it out of the window
-and a space left with no tabs gives its room to its neighbour rather than
-leaving a hole. Every row carries its own icon in front of its label: two sheets
-for a copy, a clipboard for a paste, a gear for Settings, a cross for Close this
-widget and a grid of frames for Widgets.
+Right click the prompt for Copy and Paste, a pane or its tab for Settings, Copy
+selection, Close this widget, New session and Widgets, or the settings panel's
+document column for the one row that fits there, Copy selection. A row with
+nothing to act on is greyed rather than absent, so the menu is the same shape
+every time and the row you were aiming for has not moved. Every row carries its
+own icon in front of its label: two sheets for a copy, a clipboard for a paste,
+a gear for Settings, a cross for Close this widget, a folder for New session and
+a grid of frames for Widgets.
 
-**Two of those rows are groups rather than acts**, and they say so: a chevron at
-the end of the row, pointing right while the group is shut and down while it is
-open, and a brighter label than the rows that act. Pressing one opens its rows
-in the same box, under the header and one step in from it. Settings holds the
-five sections of the panel and picking one opens the panel on that section.
-Widgets holds all eight views, and every row of it is a switch: a ticked box
-means the widget is in the window and picking it takes the widget out, an empty
-box means it is closed and picking it puts it back in the space it opens in by
-default. The menu stays open over a group so you can switch a second widget or
-read the section names without opening it again, unless what you switched off is
-the widget the menu was opened over, which takes the rest of its rows with it.
+**The title strip and the room around the panes have their own menu**, the three
+rows that belong to the window rather than to a pane: Settings, New session and
+Widgets. It is the way back, because closing a widget takes it out of the window
+and a space left with no tabs gives its room to its neighbour rather than
+leaving a hole: close the last one and there is no pane left to right click, so
+the window answers for itself and its Widgets list puts one back.
+
+**Widgets is a group rather than an act**, and it says so: a chevron at the end
+of the row, pointing right whether the group is shut or open, and a brighter
+label than the rows that act. Its rows open in a second box beside the header,
+so nothing the pointer has already read moves. It holds all eight views, and
+every row of it is a switch: a ticked box means the widget is in the window and
+picking it takes the widget out, an empty box means it is closed and picking it
+puts it back in the space it opens in by default. The menu stays open over the
+list so you can switch a second widget without opening it again, unless what you
+switched off is the widget the menu was opened over, which takes the rest of its
+rows with it.
 
 **The menu takes the keyboard too.** Up and down walk the rows that can act,
 right opens the group under the cursor and steps into one already open, left
 shuts it or steps out to the header of the group you are inside, Enter presses
 the row, and anything else puts the menu away. The menu is clamped into the
-window, and with both groups out it is taller than a short window: it shows what
-there is room for and the wheel scrolls the rest, rather than dropping the rows
-past the bottom.
+window, and with the widget list out it is taller than a short window: it shows
+what there is room for and the wheel scrolls the rest, rather than dropping the
+rows past the bottom.
 
 ## Settings
 
-**Settings opens the panel**, from a right click on any pane or tab. It takes the
+**Settings opens the panel**, from a right click on any pane or tab, or on the
+window itself. It takes the
 whole window under the title strip and it is five sections, named down a rail on
 the left with the chosen one beside it. **Click a section to choose it, or Tab to
 it.** The arrow keys never touch the rail: up and down walk the rows of whatever

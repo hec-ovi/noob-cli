@@ -3,6 +3,13 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.17 - 2026-08-07
+
+- The window has a right click menu of its own, on the title strip and on the
+  room the panes leave over: Settings, New session, and the widget list. The
+  list was only on a pane's menu, so closing the last widget left a window with
+  nothing to right click and no way to open anything again.
+
 ## 0.11.16 - 2026-08-05
 
 - Two rails no longer contradict each other into a dead sub-agent. The read

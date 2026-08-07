@@ -177,6 +177,13 @@ pub enum Hit {
     Minimize,
     Maximize,
     Close,
+    /// The window itself: the room below the title strip that no pane, no
+    /// divider and no prompt claimed. All of it once every widget is closed.
+    ///
+    /// A hit of its own rather than nothing, so a right click there has
+    /// something to open a menu for. Under a takeover the picker and the
+    /// settings panel answer for their own emptiness before this is reached.
+    Window,
     /// A view's tab, in the space it currently lives in.
     Tab(View, Space),
     /// The two arrows a strip with more tabs than room grows, at its right end.
@@ -1412,7 +1419,9 @@ impl Layout {
         if self.input.contains(x, y) {
             return Some(Hit::Input);
         }
-        None
+        // Whatever is left is the window itself: the gaps around the panes, and
+        // the whole of it once every widget has been closed.
+        Some(Hit::Window)
     }
 
     /// Where a tab released here lands.
@@ -6664,9 +6673,10 @@ mod tests {
             assert!(out.layout.placed(space).tabs.is_empty(), "{space:?}");
         }
         assert!(out.layout.input.h > 0.0, "the prompt survives");
-        // The room the panes had is unclaimed rather than claimed by a space
-        // with nothing in it.
-        assert_eq!(out.layout.hit(700.0, 450.0), None);
+        // The room the panes had answers as the window rather than as a space
+        // with nothing in it, which is what a right click there opens the
+        // window's own menu from.
+        assert_eq!(out.layout.hit(700.0, 450.0), Some(Hit::Window));
     }
 
 

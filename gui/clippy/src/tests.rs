@@ -503,7 +503,7 @@ fn middle(panel: noob_draw::Panel) -> (f32, f32) {
 }
 
 fn opened(layout: &Layout, dock: &Dock, at: (f32, f32)) -> Option<Menu> {
-    menu_for(layout.hit(at.0, at.1), at, dock, false, None, None)
+    menu_for(layout.hit(at.0, at.1), at, dock, false, None, None, false)
 }
 
 /// One step of the walk. Rebased on the tab the strip actually starts at, so
@@ -635,8 +635,13 @@ fn a_right_click_opens_the_menu_for_what_is_under_it() {
         .expect("a pane has a menu");
     assert_eq!(menu.target, Target::Widget(showing, Space::TopLeft));
 
-    // Nothing a menu could act on.
-    for at in [middle(layout.close), (400.0, 8.0)] {
+    // A window button is a press with one meaning, and a menu opened over one
+    // would cover the button it came from.
+    for at in [
+        middle(layout.close),
+        middle(layout.maximize),
+        middle(layout.minimize),
+    ] {
         assert!(opened(&layout, &dock, at).is_none(), "at {at:?}");
     }
     // Nor is anything in the settings panel: it covers the panes, so there
@@ -649,7 +654,16 @@ fn a_right_click_opens_the_menu_for_what_is_under_it() {
         Hit::SettingsClose,
     ] {
         assert!(
-            menu_for(Some(hit), (600.0, 400.0), &dock, true, a_selection_in(View::Output), None).is_none(),
+            menu_for(
+                Some(hit),
+                (600.0, 400.0),
+                &dock,
+                true,
+                a_selection_in(View::Output),
+                None,
+                true,
+            )
+            .is_none(),
             "{hit:?}"
         );
     }
@@ -659,6 +673,45 @@ fn a_right_click_opens_the_menu_for_what_is_under_it() {
     let over = laid_out(&dock, Some(&menu));
     let at = middle(over.menu_rows[0].1);
     assert!(opened(&over, &dock, at).is_none());
+}
+
+/// The title strip and the room the panes leave over are the window itself,
+/// and they open its own menu. It is the whole of the way back into a window
+/// whose widgets have all been closed: the list of widgets is on it, and with
+/// nothing left in the window there is no pane to right click for one.
+#[test]
+fn the_window_itself_has_the_menu_that_puts_a_widget_back() {
+    let mut empty = Dock::hiding(&View::ALL);
+    let layout = laid_out(&empty, None);
+
+    // The title strip, and the middle of a window with nothing in it.
+    for at in [(400.0, 8.0), (W * 0.5, H * 0.5)] {
+        let menu = opened(&layout, &empty, at).expect("the window has a menu");
+        assert_eq!(menu.target, Target::Window, "at {at:?}");
+        assert_eq!(menu.pick(0), Some(Item::Settings));
+        assert_eq!(menu.pick(1), Some(Item::NewSession));
+        assert_eq!(menu.pick(2), Some(Item::Widgets(false)));
+    }
+
+    // And its list puts one back. The menu stays open over it: it was not
+    // opened over a widget, so nothing it acts on went anywhere.
+    let mut menu = Menu::for_window((400.0, 8.0));
+    menu.fold(2, &empty);
+    let toggled = toggle_view(&mut empty, &mut menu, View::Output);
+    assert!(!toggled.hidden);
+    assert!(toggled.keep_open);
+    assert!(!empty.is_hidden(View::Output));
+    assert!(empty.is_sound(), "{empty:?}");
+
+    // Under a takeover it opens nothing: its rows act on panes that are not
+    // on screen while the picker or the settings panel owns the window.
+    let hidden = Dock::hiding(&View::ALL);
+    for hit in [Hit::TitleBar, Hit::Window] {
+        assert!(
+            menu_for(Some(hit), (400.0, 8.0), &hidden, false, None, None, true).is_none(),
+            "{hit:?}"
+        );
+    }
 }
 
 /// A picker with two saved sessions showing, one of them in a folder that
@@ -698,7 +751,15 @@ fn a_right_click_on_the_folders_view_offers_a_new_folder() {
     // the one act a folder list has; the sessions view keeps its own menu.
     let dock = Dock::new();
     let picker = a_session_picker();
-    let on_row = menu_for(Some(Hit::Picker), (300.0, 300.0), &dock, false, None, Some(&picker));
+    let on_row = menu_for(
+        Some(Hit::Picker),
+        (300.0, 300.0),
+        &dock,
+        false,
+        None,
+        Some(&picker),
+        true,
+    );
     match picker.on_sessions() {
         true => assert!(on_row.is_none(), "the sessions view has no folder to make"),
         false => {
@@ -708,7 +769,7 @@ fn a_right_click_on_the_folders_view_offers_a_new_folder() {
         }
     }
     // Without a picker there is nothing to name into.
-    assert!(menu_for(Some(Hit::Picker), (0.0, 0.0), &dock, false, None, None).is_none());
+    assert!(menu_for(Some(Hit::Picker), (0.0, 0.0), &dock, false, None, None, true).is_none());
 }
 
 #[test]
@@ -723,6 +784,7 @@ fn a_right_click_on_the_settings_table_offers_the_same_two_acts() {
         false,
         None,
         None,
+        true,
     )
     .expect("a table row has a menu");
     assert_eq!(menu.target, Target::Kept(3, 1));
@@ -736,6 +798,7 @@ fn a_right_click_on_the_settings_table_offers_the_same_two_acts() {
         false,
         None,
         None,
+        true,
     )
     .expect("the mark is the row too");
     assert_eq!(marked.target, Target::Kept(3, 1));
@@ -754,6 +817,7 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
         false,
         None,
         Some(&picker),
+        true,
     )
     .expect("a session row has a menu");
     assert_eq!(menu.target, Target::Session(0));
@@ -768,6 +832,7 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
         false,
         None,
         Some(&picker),
+        true,
     )
     .expect("that row has one too");
     assert_eq!(dead.rows.len(), menu.rows.len());
@@ -776,7 +841,7 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
 
     // A row that is not there, and the rest of the picker.
     assert!(
-        menu_for(Some(Hit::PickerRow(9)), at, &dock, false, None, Some(&picker)).is_none()
+        menu_for(Some(Hit::PickerRow(9)), at, &dock, false, None, Some(&picker), true).is_none()
     );
     for hit in [
         Hit::Picker,
@@ -786,7 +851,7 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
         Hit::PickerSessions,
     ] {
         assert!(
-            menu_for(Some(hit), at, &dock, false, None, Some(&picker)).is_none(),
+            menu_for(Some(hit), at, &dock, false, None, Some(&picker), true).is_none(),
             "{hit:?}"
         );
     }
@@ -798,7 +863,15 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
         PathBuf::from("/home/hec"),
         Vec::new(),
     );
-    let made = menu_for(Some(Hit::PickerRow(0)), at, &dock, false, None, Some(&folders))
+    let made = menu_for(
+        Some(Hit::PickerRow(0)),
+        at,
+        &dock,
+        false,
+        None,
+        Some(&folders),
+        true,
+    )
         .expect("a folder row has the folders menu");
     assert_eq!(made.target, Target::Picker);
     assert_eq!(made.pick(0), Some(Item::NewFolder));
@@ -1353,9 +1426,10 @@ fn the_copy_row_reads_the_selection_of_its_own_pane() {
     let at = middle(tab);
     let hit = layout.hit(at.0, at.1);
 
-    let mine = menu_for(hit, at, &dock, false, a_selection_in(view), None).unwrap();
+    let mine = menu_for(hit, at, &dock, false, a_selection_in(view), None, false).unwrap();
     assert_eq!(mine.pick(1), Some(Item::CopySelection));
-    let elsewhere = menu_for(hit, at, &dock, false, a_selection_in(View::Output), None).unwrap();
+    let elsewhere =
+        menu_for(hit, at, &dock, false, a_selection_in(View::Output), None, false).unwrap();
     assert_eq!(elsewhere.pick(1), None);
     assert_eq!(
         mine.rows.len(),
@@ -1367,10 +1441,13 @@ fn the_copy_row_reads_the_selection_of_its_own_pane() {
     let at = middle(layout.input);
     let hit = layout.hit(at.0, at.1);
     assert_eq!(
-        menu_for(hit, at, &dock, true, None, None).unwrap().pick(0),
+        menu_for(hit, at, &dock, true, None, None, false).unwrap().pick(0),
         Some(Item::Copy)
     );
-    assert_eq!(menu_for(hit, at, &dock, false, None, None).unwrap().pick(0), None);
+    assert_eq!(
+        menu_for(hit, at, &dock, false, None, None, false).unwrap().pick(0),
+        None
+    );
 }
 
 /// A row of the list is a switch: a widget in the window goes out, and one

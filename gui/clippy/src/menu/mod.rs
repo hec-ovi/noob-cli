@@ -231,6 +231,10 @@ pub enum Target {
     /// nothing: the one row acts on whatever is highlighted there, and the
     /// panel already knows which entry that is.
     SettingsDoc,
+    /// The window itself: its title strip, and the room left over when the
+    /// panes do not fill it. It carries nothing, because there is no pane
+    /// under the pointer for a row to act on.
+    Window,
 }
 
 /// An open menu: where it was opened, what it was opened on, and its rows.
@@ -287,6 +291,27 @@ impl Menu {
                 Row::act(Item::Settings, true),
                 Row::act(Item::CopySelection, has_selection),
                 Row::act(Item::Close, true),
+                Row::act(Item::NewSession, true),
+                Row::act(Item::Widgets(false), true),
+            ],
+        )
+    }
+
+    /// The window's own menu: the acts that belong to the window rather than to
+    /// a pane, and the widgets flyout.
+    ///
+    /// What the title strip and the room around the panes open. Without it, a
+    /// window with every widget closed has no menu anywhere and no way back:
+    /// the list of widgets would only ever be reachable from a widget.
+    ///
+    /// The pane's menu minus the two rows that need a pane under the pointer:
+    /// there is nothing here to close and nothing here to copy.
+    pub fn for_window(at: (f32, f32)) -> Menu {
+        Menu::of(
+            at,
+            Target::Window,
+            vec![
+                Row::act(Item::Settings, true),
                 Row::act(Item::NewSession, true),
                 Row::act(Item::Widgets(false), true),
             ],
@@ -371,7 +396,7 @@ impl Menu {
         match self.target {
             Target::Widget(view, _) => Some(view),
             Target::Input | Target::Session(_) | Target::Kept(..) | Target::Picker
-            | Target::SettingsDoc => None,
+            | Target::SettingsDoc | Target::Window => None,
         }
     }
 

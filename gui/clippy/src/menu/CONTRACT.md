@@ -4,9 +4,9 @@ contractVersion: 2.0.0
 
 ## Purpose
 
-The right-click menus as a model: the prompt's, a widget's, a session's,
-rows with icons and warning colors, and the widgets flyout. The view draws
-it last and hit-tests it first; this box only decides what is in it.
+The right-click menus as a model: the prompt's, a widget's, a session's, the
+window's own, rows with icons and warning colors, and the widgets flyout. The
+view draws it last and hit-tests it first; this box only decides what is in it.
 
 ## Public surface
 
@@ -21,6 +21,9 @@ impl Menu {
     pub fn for_input(at: (f32, f32), has_selection: bool) -> Menu;
     pub fn for_widget(at: (f32, f32), view: View, space: Space,
                       has_selection: bool) -> Menu;
+    pub fn for_window(at: (f32, f32)) -> Menu;
+                             // the title strip and the room around the
+                             // panes: Settings, New session, Widgets
     pub fn for_session(at: (f32, f32), index: usize, gone: bool) -> Menu;
     // rows, pick(index), fold (the flyout), fly_start/fly_anchor/main_len,
     // width_chars/fly_width_chars, walk/scroll/point_at/hover
@@ -39,6 +42,8 @@ impl Menu {
    greyed, not hidden, so the menu's shape is stable.
 3. Settings is one act that opens the settings panel; the panel's rail is
    the only list of sections.
+4. The widgets flyout is on the window's menu as well as on a pane's, so a
+   window with every widget closed still has the list that puts one back.
 
 ## Dependencies
 

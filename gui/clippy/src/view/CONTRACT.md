@@ -18,7 +18,9 @@ pub struct Shape<'a>;        // everything placement needs: the dock, the
 pub struct Layout;           // compute(w, h, &Shape) -> every rectangle
 impl Layout {
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit>;   // one point, one
-                             // answer, from the same rectangles paint used
+                             // answer, from the same rectangles paint used.
+                             // Room no surface claimed answers Hit::Window,
+                             // so a right click there still has a target
     // capacity and geometry queries per surface (rows, cells, carets)
 }
 pub enum Hit;                // every clickable thing, one variant each

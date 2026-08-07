@@ -2765,6 +2765,10 @@ impl App {
             // Both handled above, while a menu is open, which is the only
             // time either can be hit at all.
             Hit::MenuRow(_) | Hit::Menu => {}
+            // The window's own room. The left button has nothing to do here:
+            // there is no pane to select in and nothing to press. The right
+            // button is the one that opens its menu.
+            Hit::Window => {}
             // A press on the popup starts a selection over its document; the
             // band and the copy resolve against the same lines the blocks
             // are drawn from.
@@ -2955,6 +2959,7 @@ impl App {
             self.prompt.selection().is_some(),
             self.selection,
             self.picker.as_ref(),
+            self.picker.is_some() || self.settings.is_some(),
         );
         self.dirty |= had || self.menu.is_some();
     }
@@ -3005,7 +3010,7 @@ impl App {
             (
                 Item::Close,
                 Target::Input | Target::Session(_) | Target::Kept(..) | Target::Picker
-                | Target::SettingsDoc,
+                | Target::SettingsDoc | Target::Window,
             ) => {}
             // The same two things pressing the row and pressing Delete do, from
             // the menu the right button opened over it.
@@ -3039,7 +3044,8 @@ impl App {
             }
             // Neither row is on any menu but a session's.
             (Item::OpenSession | Item::DeleteSession(_),
-                Target::Input | Target::Widget(..) | Target::Picker | Target::SettingsDoc) => {}
+                Target::Input | Target::Widget(..) | Target::Picker | Target::SettingsDoc
+                | Target::Window) => {}
             // A switch rather than a destination, so the menu stays open over it
             // and can be switched again. See [`toggle_view`] for the one case
             // where it cannot.
