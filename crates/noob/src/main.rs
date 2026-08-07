@@ -1065,6 +1065,7 @@ fn cmd_child() -> ExitCode {
     );
     boot.read_only = read_only;
     boot.web_only = web_only;
+    boot.child = true;
     boot.verbose = runtime
         .and_then(|value| value.get("verbose"))
         .and_then(serde_json::Value::as_bool)
@@ -1244,9 +1245,7 @@ fn cmd_debug(args: &[String]) -> ExitCode {
     let system = prompt::assemble_from(head.clone(), &inputs);
     if json_mode {
         let mut tool_specs = tools::specs();
-        if !discovered.is_empty() || current_depth() == 0 {
-            tool_specs.push(tools::skill::spec());
-        }
+        tool_specs.push(tools::skill::spec());
         if !mcp_servers.is_empty() {
             tool_specs.push(tools::mcp::connect_spec());
             tool_specs.push(tools::mcp::call_spec());

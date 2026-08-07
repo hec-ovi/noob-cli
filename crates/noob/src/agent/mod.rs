@@ -1005,18 +1005,6 @@ impl Agent {
             // unused grant into a later model turn.
             self.tool_ctx.grants.clear();
 
-            // A skill the skill tool installed this batch: rediscover, so the
-            // new skill is loadable in-session and the model hears about it
-            // through the same [skills updated] message a /skills add sends.
-            if self
-                .tool_ctx
-                .skills
-                .installed
-                .swap(false, Ordering::SeqCst)
-            {
-                self.reload_skills(ui);
-            }
-
             let mut nudge = false;
             for (call, outcome) in turn.tool_calls.iter().zip(&outcomes) {
                 // A canceled call never executed: drop its doom-window
@@ -1039,6 +1027,14 @@ impl Agent {
                 } else {
                     self.consec_errors = 0;
                 }
+            }
+            // A skill the skill tool installed this batch: rediscover, so the
+            // new skill is loadable in-session and the model hears about it
+            // through the same [skills updated] message a /skills add sends.
+            // After the results above, so the message never lands between a
+            // call and its result.
+            if self.tool_ctx.skills.installed.swap(false, Ordering::SeqCst) {
+                self.reload_skills(ui);
             }
             self.show_session_warning(ui);
             if INTERRUPTED.load(Ordering::SeqCst) {

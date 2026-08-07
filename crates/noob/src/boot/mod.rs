@@ -40,6 +40,11 @@ pub(crate) struct BootArgs {
     pub(crate) read_only: bool,
     /// Nonmutating research child: local reads plus the websearch CLI tool.
     pub(crate) web_only: bool,
+    /// This process is a sub-agent (`noob child`). Children register the
+    /// skill tool only when discovery found a skill; every top-level surface
+    /// registers it always, because its install action must work before any
+    /// skill does.
+    pub(crate) child: bool,
     /// Relay sub-agent stderr as `[subagent] ...` diagnostics.
     pub(crate) verbose: bool,
     /// Skill names already loaded by ancestor agents. A child filters these
@@ -62,6 +67,7 @@ impl BootArgs {
             plan,
             read_only: false,
             web_only: false,
+            child: false,
             verbose: false,
             excluded_skills: Vec::new(),
             session,
@@ -172,7 +178,7 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
     // with the full set.
     let depth = current_depth();
     let mut tool_specs = tools::specs();
-    if !discovered.is_empty() || depth == 0 {
+    if !discovered.is_empty() || !boot.child {
         tool_specs.push(tools::skill::spec());
     }
     if !mcp_servers.is_empty() {

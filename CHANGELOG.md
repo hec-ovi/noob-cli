@@ -3,6 +3,20 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.12.0 - 2026-08-07
+
+- The agent installs skills. Point it at a folder or repo holding a SKILL.md
+  and it offers to install; the skill tool's new install action takes a local
+  directory or a git url, and every install needs a yes from the human. The
+  skill lands in the config dir's `skills/`, the same folder the settings
+  panel lists, and is loadable in the same session. The skill tool is now
+  registered even before any skill exists, so a first install works.
+- Protocol v3 carries those confirmations: an `ask` frame poses a yes/no
+  question and the turn blocks until the matching `ask.answer` returns.
+  The window pins the question to the OUTPUT pane bottom and takes a bare
+  y or n while nothing is typed; the same rail answers the skills-directory
+  write gate, which used to be refused outright under the window.
+
 ## 0.11.17 - 2026-08-07
 
 - The window has a right click menu of its own, on the title strip and on the
