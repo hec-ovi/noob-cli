@@ -257,7 +257,7 @@ WRAP
     echo "  ./dev.sh                    open the agent"
     echo "  ./dev.sh --resume <id>      resume a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
-    echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
+    echo "  ./dev.sh test|build|package|docker|exec \"prompt\"|smoke|size-check|clean"
     echo "  ./dev.sh test-all            every suite and gate in one pass"
     echo "  ./dev.sh check-macos         type-check both workspaces for the mac target"
     echo "  ./dev.sh gui [workspace]     open NO0B, the GPU front end"
