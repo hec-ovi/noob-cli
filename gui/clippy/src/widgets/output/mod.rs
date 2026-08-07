@@ -56,18 +56,28 @@ pub(crate) fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
             .scrolled(state.output.window(rows, cols).skip as f32)
             .wrap_at(cols),
     );
-    // The pinned rows themselves: one dim line per waiting message, styled
-    // like the `› message` record it will become with the `[queued]` tag on
-    // the end, clipped to one physical row so a long message cannot wrap into
-    // the transcript's room. A queue deeper than the panel says how much of
-    // it is out of sight rather than hiding it.
+    // The pinned rows themselves: the agent's pending question first, bright
+    // because the turn is blocked on it, then one dim line per waiting
+    // message, styled like the `› message` record it will become with the
+    // `[queued]` tag on the end. Each is clipped to one physical row so a
+    // long line cannot wrap into the transcript's room. A queue deeper than
+    // the panel says how much of it is out of sight rather than hiding it.
     if reserved > 0 {
         let inset = panel.inset(PAD);
         let line = Text::line_for(frame.body_size);
         let mut pinned = Vec::new();
-        for (step, message) in state.queued.iter().take(reserved).enumerate() {
-            let text = if step + 1 == reserved && state.queued.len() > reserved {
-                format!("… {} more queued", state.queued.len() - reserved + 1)
+        let mut room = reserved;
+        if let Some((_, question)) = &state.ask {
+            pinned.push(Run::tinted(
+                clip(&format!("? {question} [y/n]"), cols),
+                skin.bright,
+            ));
+            pinned.push(Run::plain("\n"));
+            room -= 1;
+        }
+        for (step, message) in state.queued.iter().take(room).enumerate() {
+            let text = if step + 1 == room && state.queued.len() > room {
+                format!("… {} more queued", state.queued.len() - room + 1)
             } else {
                 clip(&format!("› {message} [queued]"), cols)
             };
@@ -138,6 +148,26 @@ mod tests {
         assert!(text.contains("› try the other file"));
         assert!(!text.contains("[queued]"));
     }
+    /// The agent's pending question is pinned bright into the OUTPUT pane
+    /// with the y/n hint, and the turn ending takes it away unanswered.
+    #[test]
+    fn a_pending_ask_pins_a_question_row_until_the_turn_ends() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::Ask {
+            ask_id: 1,
+            question: "install skill from ./research?".into(),
+        });
+        let text = text_of(&render_at(&state, 0.0).scene);
+        assert!(text.contains("? install skill from ./research? [y/n]"), "{text}");
+        state.apply(noob_proto::Event::TurnEnd {
+            turn: 1,
+            interrupted: Some(true),
+        });
+        assert!(state.ask.is_none());
+        let text = text_of(&render_at(&state, 0.0).scene);
+        assert!(!text.contains("[y/n]"));
+    }
+
     /// The transcript is drawn as Markdown, and it is counted in the Markdown
     /// it drew.
     ///

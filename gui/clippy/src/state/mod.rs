@@ -1196,6 +1196,11 @@ pub struct State {
     pub files: Vec<FileView>,
     pub open_file: usize,
 
+    /// A yes/no question the agent is blocked on (an `ask` frame): the id to
+    /// answer with and the question itself. Pinned to the OUTPUT bottom until
+    /// the shell answers it or the turn ends without an answer.
+    pub ask: Option<(u64, String)>,
+
     pub usage: Option<Usage>,
     pub prefilled: u64,
     pub generated: u64,
@@ -1280,6 +1285,7 @@ impl State {
             shown_agent: None,
             files: Vec::new(),
             open_file: 0,
+            ask: None,
             usage: None,
             prefilled: 0,
             generated: 0,
@@ -1456,11 +1462,11 @@ impl State {
         self.queued.push(text.to_string());
     }
 
-    /// How many of a panel's rows the queued messages pin to its bottom. At
-    /// least one row always stays with the transcript, so a queue can crowd
-    /// the conversation but never replace it.
+    /// How many of a panel's rows the queued messages, and a pending ask,
+    /// pin to its bottom. At least one row always stays with the transcript,
+    /// so the pinned rows can crowd the conversation but never replace it.
     pub fn output_reserved(&self, rows: usize) -> usize {
-        self.queued.len().min(rows.saturating_sub(1))
+        (self.queued.len() + usize::from(self.ask.is_some())).min(rows.saturating_sub(1))
     }
 
     /// The `› message` record both submission paths write.
@@ -1547,8 +1553,10 @@ impl State {
                 self.phase = Phase::Gone;
                 self.status = String::from("the agent stopped");
                 // Nothing is left to dispatch these; a [queued] row outliving
-                // the agent would promise a turn that can never come.
+                // the agent would promise a turn that can never come. The
+                // same goes for a question nobody is waiting to hear back on.
                 self.queued.clear();
+                self.ask = None;
             }
             Event::TurnStart { turn } => {
                 self.turn = turn;
@@ -1571,6 +1579,8 @@ impl State {
                     Phase::Finished
                 };
                 self.status = self.phase.word().to_lowercase();
+                // The turn that asked is over; the question died with it.
+                self.ask = None;
                 // Close anything left open, so a row cannot show as running
                 // after the turn that owned it has ended. The row goes to the
                 // failure colour and the reason waits on its popup, the same
@@ -1875,6 +1885,10 @@ impl State {
             // A replayed prompt from a recorded session: the record the
             // live submit would have echoed, without the phase moving.
             Event::UserEcho { text } => self.echo(&text),
+            Event::Ask { ask_id, question } => {
+                self.ask = Some((ask_id, question));
+                self.status = String::from("waiting on you: y or n");
+            }
             Event::Note { line } => self.output.say(line, Tone::Dim),
             Event::Error { line } => {
                 self.output.blank_if_needed();

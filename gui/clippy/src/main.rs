@@ -2456,6 +2456,23 @@ impl App {
         }
     }
 
+    /// Answer the agent's pending yes/no question. The exchange enters the
+    /// transcript so what was allowed reads back later.
+    fn answer_ask(&mut self, yes: bool) {
+        let Some((ask_id, question)) = self.state.ask.take() else {
+            return;
+        };
+        if let Some(link) = self.link.as_mut() {
+            link.send(Cmd::AskAnswer { ask_id, yes });
+        }
+        self.state.output.say(format!("? {question}"), Tone::Dim);
+        self.state
+            .output
+            .say(if yes { "· yes" } else { "· no" }, Tone::Dim);
+        self.state.status = String::from("thinking");
+        self.dirty = true;
+    }
+
     fn cancel(&mut self) {
         if let Some(link) = self.link.as_mut() {
             link.send(Cmd::TurnCancel);
@@ -3798,6 +3815,14 @@ impl App {
             self.dirty |= self.esc_armed.take().is_some();
         }
         match event.logical_key.as_ref() {
+            // The agent's pending question (the pinned `?` row) takes a bare
+            // y or n while nothing is being typed; a prompt in progress keeps
+            // every key, so typed text can never be spent as an answer.
+            Key::Character(answer @ ("y" | "Y" | "n" | "N"))
+                if self.state.ask.is_some() && self.prompt.is_empty() && !ctrl =>
+            {
+                self.answer_ask(answer.eq_ignore_ascii_case("y"));
+            }
             Key::Named(NamedKey::Enter) => self.submit(),
             Key::Named(NamedKey::Backspace) => self.dirty |= self.prompt.backspace(),
             Key::Named(NamedKey::Delete) => self.dirty |= self.prompt.delete(),

@@ -22,14 +22,17 @@ impl State {
     pub fn enqueue(&mut self, text: &str);     // wait in `queued`; echoes
                                                // once at the turn.start
                                                // that takes it, front first
-    pub fn output_reserved(&self, rows: usize) -> usize;  // rows the queue
-                                               // pins at the OUTPUT bottom;
-                                               // one row always stays text
+    pub fn output_reserved(&self, rows: usize) -> usize;  // rows the queue,
+                                               // and a pending ask, pin at
+                                               // the OUTPUT bottom; one row
+                                               // always stays text
     pub fn show_agent(&mut self, ordinal: usize) -> bool;  // point the
                                                // output tab at one agent
     pub fn agent_shown(&self) -> Option<&AgentRow>;  // and read it back
     // read surface: output/activity/queued/plan/agents/files/context/
-    // phase/status/usage/turn and the wrapped panes.
+    // phase/status/usage/turn and the wrapped panes; ask holds the yes/no
+    // question the agent is blocked on ((ask_id, question), cleared by the
+    // shell's answer or the end of the turn that asked).
     // agents holds the live fleet only: each row carries a stable 1-based
     // ordinal (spawn order) and its own bounded output pane; a child that
     // finishes leaves the list in the event that ends it, and shown_agent
