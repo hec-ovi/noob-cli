@@ -127,11 +127,11 @@ fn resolver_index_and_tool_registration() {
     rig.server.assert_clean();
 }
 
-/// No skills discovered: no resolver section, no skill tool; the tools
-/// array stays the 9 core specs plus subagent (the registered set is decided at
-/// start).
+/// No skills discovered: no resolver section, but the skill tool is still
+/// registered at the top level, because its install action must work before
+/// any skill does (the registered set is decided at start).
 #[test]
-fn no_skills_means_no_skill_tool_and_no_section() {
+fn no_skills_still_registers_the_skill_tool_but_no_section() {
     let rig = rig();
     rig.server.enqueue_stream_completion("bare");
 
@@ -140,7 +140,9 @@ fn no_skills_means_no_skill_tool_and_no_section() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("# Skills"));
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
+    let tools = reqs[0]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 11);
+    assert!(tools.iter().any(|t| t["function"]["name"] == "skill"));
     rig.server.assert_clean();
 }
 

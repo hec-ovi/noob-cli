@@ -59,7 +59,7 @@ fn serve_with(
         .map(|line| {
             let value: Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("stdout must be frames only, got {line:?}: {e}"));
-            assert_eq!(value["v"], 2, "{line}");
+            assert_eq!(value["v"], 3, "{line}");
             value
         })
         .collect();
@@ -115,6 +115,53 @@ fn a_prompt_in_produces_a_whole_turn_out() {
     let id = frames[0]["id"].as_str().unwrap();
     assert!(!id.is_empty(), "serve names its session");
     assert_eq!(frames.last().unwrap()["id"], id);
+}
+
+/// The whole skill-install handshake through the wire: the model calls the
+/// skill tool's install action, the turn blocks on an `ask` frame, the front
+/// end's yes lands the skill in the config skills root.
+#[test]
+fn a_skill_install_asks_over_the_wire_and_lands_on_yes() {
+    let server = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // The skill the "user" pointed the agent at.
+    let src = work.path().join("research");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("SKILL.md"),
+        "---\nname: research\ndescription: finds things\n---\nbody\n",
+    )
+    .unwrap();
+    server.enqueue_stream_toolcalls(
+        &[("c1", "skill", r#"{"install":"./research"}"#)],
+        None,
+    );
+    server.enqueue_completion("installed");
+    write_env(config.path(), &server.base_url());
+
+    let (frames, _stderr) = serve(
+        config.path(),
+        work.path(),
+        &[
+            serde_json::json!({"v": 3, "t": "prompt.submit", "text": "install the skill in ./research"}),
+            serde_json::json!({"v": 3, "t": "ask.answer", "ask_id": 1, "yes": true}),
+        ],
+    );
+    server.assert_clean();
+
+    let kinds = kinds(&frames);
+    assert!(kinds.contains(&"ask"), "{kinds:?}");
+    let ask = frames.iter().find(|f| f["t"] == "ask").unwrap();
+    assert_eq!(ask["ask_id"], 1);
+    assert!(
+        ask["question"].as_str().unwrap().contains("install skill from"),
+        "{ask}"
+    );
+    assert!(
+        config.path().join("skills/research/SKILL.md").is_file(),
+        "the install lands in the config skills root"
+    );
 }
 
 /// The agent could not say which session it was in, because nothing told it.

@@ -1360,8 +1360,8 @@ fn depth_cap_removes_the_task_schema() {
     assert!(!names.contains(&"subagent".to_string()), "{names:?}");
     assert_eq!(
         names.len(),
-        9,
-        "the 9 core tools only (no subagent at the depth cap)"
+        10,
+        "the 9 core tools plus skill (no subagent at the depth cap)"
     );
     rig.server.assert_clean();
 }

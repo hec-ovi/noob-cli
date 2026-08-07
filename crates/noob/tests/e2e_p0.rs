@@ -58,11 +58,12 @@ fn exec_round_trip_against_mock() {
     let body = req.json().unwrap();
     assert_eq!(body["model"], "mockmodel");
     // The request carries the frozen system head and the core tools
-    // (9 core: 7 file/shell tools + context + todo, plus subagent).
+    // (9 core: 7 file/shell tools + context + todo, plus skill, always
+    // registered at the top level, plus subagent).
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "say hi");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 11);
     server.assert_clean();
 }
 
